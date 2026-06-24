@@ -45,3 +45,399 @@ def transform_word(w, sm, cm, in_reg=False):
         return sm.get(core, core)
 
     return RE_WORD.sub(_replace, w)
+
+
+import os, json, re, argparse
+import concurrent.futures
+
+# 정규식 사전 컴파일
+RE_INDENT = re.compile(r'^\s*')
+RE_START_MATCH = re.compile(r"START\s+#?(\d+)")
+RE_END_MATCH = re.compile(r'^\s*END\b')
+RE_SPACE = re.compile(r'(\s+)')
+RE_C = re.compile(r"^C(\d+)$")
+RE_CYP = re.compile(r"^CYP(\d+)$")
+RE_TS = re.compile(r"^TS(\d+)$")
+# [수정] 상수기호($)를 포함한 순수 단어만 추출 (기호 무시)
+RE_WORD = re.compile(r"[\$]?[A-Za-z0-9_]+")
+RE_PARTS = re.compile(r"^([A-Za-z]+)(\d+)([A-Za-z]*)$")
+RE_TPH = re.compile(r"^TPH(\d+)([A-D])$")
+RE_TAGS = re.compile(r'(<(?:START|\$\d+)>)') 
+RE_DIAMOND = re.compile(r'([^ \t\n<>]+)(\s*)<>\s*([^ \t\n<>]+)')
+
+RE_SET = re.compile(r"\b(SET)(\s*D\d+[A-Z]\s*)([\$][a-zA-Z0-9]+)\b")
+RE_D_LETTER_1 = re.compile(r"\b(D\d+[A-Z])(\s*[<=]+\s*)([#$]?[A-Za-z0-9]+)(\s*)")
+RE_D_LETTER_MATCH = re.compile(r"^D(\d+)([A-Z])$")
+RE_D_LETTER_2 = re.compile(r"\b([0-9A-Za-z]{2,3})(\s*[=+]+\s*)(D\d+[A-Z])\b")
+RE_D5N = re.compile(r"\b(D5[A-Z])(\s*[=]+\s*)([^ \n]+)")
+RE_D5N_MATCH = re.compile(r"^D5([A-Z])$")
+RE_TP_SPLIT_1 = re.compile(r"\b(TP\d+_\d+)(\s*[=]+\s*)(\S+)")
+RE_TP_SPLIT_2 = re.compile(r"\b([A-Za-z0-9_]+)\s*([=]+)\s*(TP\d+_\d+)(?!\s*[\*\+\-\=])\b")
+RE_TP_MATCH = re.compile(r"TP\d+_\d+")
+
+def load_rules(filepath="pat_rule.json"):
+    # JSON 룰셋 로드
+    with open(filepath, "r", encoding="utf-8") as f: 
+        r = json.load(f)
+    sm = r.get("simple", {})
+    cm = r.get("complex", {})
+
+    # complex 정규식 컴파일
+    for k, v in cm.items():
+        if isinstance(v, dict) and "pattern" in v:
+            v["compiled_pattern"] = re.compile(v["pattern"])
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict) and "pattern" in item and isinstance(item["pattern"], str):
+                    item["compiled_pattern"] = re.compile(item["pattern"])
+
+    for k in ["XSK", "YSK"]:
+        if k in cm and "pattern" in cm[k]:
+            cm[k]["compiled_pattern"] = re.compile(cm[k]["pattern"].strip('^$'))
+
+    for k in ["DRE", "CPE"]:
+        if k in cm:
+            for var, rule in cm[k].items():
+                rule["compiled_pattern"] = re.compile(rf"\b({var})(\s*=\s*)({re.escape(rule['target'])})\b")
+
+    # GROUP_B (점프/분기) 정규식 조립
+    group_b = {k: v if isinstance(v, list) else [v] for k, v in cm.items() if k in ["JNI", "JSI", "JL"]}
+    if group_b:
+        keys_re = "|".join(group_b.keys())
+        all_exts = set()
+        for rules in group_b.values():
+            for r in rules:
+                exts = r.get("extra")
+                exts_list = exts if isinstance(exts, list) else [exts] if exts else []
+                for e in exts_list:
+                    if e and e.strip():
+                        all_exts.add(re.escape(e.strip()))
+        
+        suf_re = rf"(?:\s*({'|'.join(sorted(all_exts, key=len, reverse=True))})(?!\w))?" if all_exts else r"()"
+        cm["GROUP_B_COMPILED"] = re.compile(rf"\b({keys_re})(\d+){suf_re}")
+        cm["GROUP_B_RULES"] = group_b
+
+    return sm, cm
+
+def preprocess(text):
+    # 라인 분리 및 레지스터 상태 관리
+    lines, reg_lines, cleaned, output = text.splitlines(), [], [], []
+    in_reg, in_start = False, False 
+    
+    for line in lines:
+        s = line.strip()
+        if s.startswith("REGISTER"): in_reg = True 
+        elif in_reg and "ADDRESS" in s: 
+            in_reg = False 
+            cleaned.append(line) 
+        elif in_reg: reg_lines.append(line)
+        else: cleaned.append(line)
+
+    reg_inserted = False 
+    for line in cleaned:
+        s, blk = line.strip(), (RE_INDENT.match(line).group(0) if line else "")
+    
+        if not reg_inserted and "ADDRESS" in s and reg_lines:
+            output.extend([blk + "DATA 0"] + reg_lines + [blk + " ", line])
+            reg_inserted = True
+            continue
+            
+        if s.startswith("START"):
+            if in_start: output.append(blk + "END") 
+            m = RE_START_MATCH.match(s)
+            output.append(blk +"MICRO1D\n"+ (f"<${m.group(1)}>" if m else "<START>"))
+            in_start = True
+            continue
+            
+        if s == "END" or s.startswith(("HALT","MODULE END")):
+            output.append(line)
+            if s != "END" and in_start: output.append(blk + "END")
+            in_start = False 
+            continue
+            
+        output.append(line)
+        
+    if in_start: 
+        output.append((RE_INDENT.match(output[-1]).group(0) if output else "") + "END")
+        
+    return "\n".join(output)
+
+def _calc_d_idx(num, let, ranges):
+    # D 변수 인덱스 수학적 연산
+    prev_len = sum(len(ranges[f"D{i}"]) for i in range(1, num) if f"D{i}" in ranges and f"D{i}" != "D3")
+    return prev_len + ranges[f"D{num}"].index(let) + 1
+
+def _convert_c_token(n, psr_mode):
+    # C 토큰 번호별 맵핑 치환
+    if psr_mode and 10 <= n <= 13: return ["PSRPAT PSRA=PSRA+1", "_PSRA=PSRAP1", "_PSRA=PSRAP2", "_PSRA=PSRAP3"][n-10]
+    if n == 18: return "W"
+    if n == 0:  return "RB0"
+    if n <= 9:  return f"RB{n}"
+    if 14 <= n <= 17: return f"RB{n-13}"
+    return f"RB{n}"
+
+def _process_regex_rules(line, cm, in_reg=False):
+    # SET 명령어 캡처 및 플래그 활성화
+    set_flg = False 
+    if r_set := cm.get("SET"):
+        if "compiled_pattern" in r_set:
+            def repl_set(m):
+                nonlocal set_flg
+                set_flg = True
+                return r_set["output"].format(word="NOP", content=m.group(2).replace(' ', ''), val=f"<{m.group(3)}")
+            line = r_set["compiled_pattern"].sub(repl_set, line)
+    
+    # D_with_letter 복합 변환
+    if r_d := cm.get("D_with_letter"):
+        ranges = r_d.get("ranges", {})
+        
+        def repl_d1(m):
+            mv = RE_D_LETTER_MATCH.match(m.group(1))
+            if not mv: return m.group(0)
+            num, let = int(mv.group(1)), mv.group(2)
+            if f"D{num}" in ranges and let in ranges[f"D{num}"]:
+                idx = _calc_d_idx(num, let, ranges)
+                if mv.group(1) == "3": fmt = r_d.get("D3B") if in_reg else r_d.get("D3B_start", r_d.get("D3B", "").replace(".", ""))
+                elif mv.group(1) == "4": fmt = r_d.get("D4B") if in_reg else r_d.get("D4B_start", r_d.get("D4B", "").replace(".", ""))
+                elif set_flg: fmt = r_d.get("output") if in_reg else r_d.get("output_start", r_d.get("output", "").replace(".", ""))
+                else: fmt = r_d.get("output") if in_reg else r_d.get("output_start", r_d.get("output", "").replace(".", ""))
+                
+                # SET 라인 후행 여백 고정
+                trailing_space = m.group(4)
+                if set_flg and trailing_space:
+                    trailing_space = "  "
+                
+                return fmt.format(index=idx, val=f"{m.group(2)}{m.group(3)}") + trailing_space
+            return m.group(0)
+        line = RE_D_LETTER_1.sub(repl_d1, line)
+
+        def repl_d2(m):
+            mv = RE_D_LETTER_MATCH.match(m.group(3))
+            if not mv: return m.group(0)
+            num, let = int(mv.group(1)), mv.group(2)
+            if f"D{num}" in ranges and let in ranges[f"D{num}"]:
+                idx = _calc_d_idx(num, let, ranges)
+                dot = "." if in_reg else ""
+                fmt = r_d.get("output_val", "{content} {val}") 
+                if "X" in m.group(1): return fmt.format(content=m.group(1), val=f"{m.group(2)}{dot}XD{idx}", index=idx)
+                elif "Y" in m.group(1): return fmt.format(content=m.group(1), val=f"{m.group(2)}{dot}YD{idx}", index=idx)
+                else: return fmt.format(content=m.group(1), val=f"{m.group(2)}{dot}YD{idx}" if mv.group(1) == "4" else f"{m.group(2)}{dot}XD{idx}", index=idx)
+            return m.group(0)
+        line = RE_D_LETTER_2.sub(repl_d2, line)
+
+    if r_d := cm.get("D5n"):
+        def repl_d5n(m):
+            mv = RE_D5N_MATCH.match(m.group(1))
+            if not mv: return m.group(0)
+            idx = 11 if mv.group(1) == "B" else 12 if mv.group(1) == "C" else 13
+            fmt = r_d.get("output") if in_reg else r_d.get("output_start", r_d.get("output", "").replace(".", ""))
+            return fmt.format(index=idx, val=f"{m.group(2)}{m.group(3)}")
+        line = RE_D5N.sub(repl_d5n, line)
+    
+    # 단일 명령어 일괄 변환 루프
+    for key in ["IDX", "IDXI", "STI", "XSK", "YSK"]:
+        if (rule := cm.get(key)) and "compiled_pattern" in rule:
+            if key == "IDX":
+                line = rule["compiled_pattern"].sub(lambda m: rule["output"].format(num=m.group(1).replace("IDX", ""), val=m.group(2) + m.group(3)), line)
+            elif key == "IDXI":
+                line = rule["compiled_pattern"].sub(lambda m: rule["output"].format(val=m.group(2).replace('$', ''), tab="\t"), line)
+            elif key == "STI":
+                line = rule["compiled_pattern"].sub(lambda m: rule["output"].format(word="NOOP", tab="\t", num=m.group(1).replace("STI", ""), val=m.group(2).replace('$', '=')), line)
+            else:
+                line = rule["compiled_pattern"].sub(lambda m: rule["output"].format(val="".join(g for g in m.groups() if g)), line)
+                
+    for k in ["DRE", "CPE"]:
+        if k in cm:
+            for var, rule in cm[k].items():
+                if "compiled_pattern" in rule:
+                    line = rule["compiled_pattern"].sub(rf"\g<1>\g<2>{rule['output']}", line)
+    
+    if r_tp12 := cm.get("TP_SPLIT"):
+        def repl_tp1(m):
+            right_val = m.group(3).strip(';')
+            if not RE_TP_MATCH.search(right_val) and "$" in right_val:
+                eval_str = right_val.replace('$','') 
+                return r_tp12["output"].format(op=m.group(2).strip(), high=f"{eval_str[:7]}", low=f"${eval_str[7:]}")
+            return m.group(0)
+        line = RE_TP_SPLIT_1.sub(repl_tp1, line)
+
+        def repl_tp2(m):
+            if not RE_TP_MATCH.match(m.group(1)): return f"{m.group(1)}{m.group(2)}THB {m.group(1)}{m.group(2)}TLB"
+            return m.group(0)
+        line = RE_TP_SPLIT_2.sub(repl_tp2, line)
+
+    return line
+
+def _process_complex_commands(line, cm):
+    # 중복 실행 방지
+    skip_keys = {"JNI", "JSI", "JL", "SET", "D_with_letter", "D5n", "IDX", "IDXI", "STI", "XSK", "YSK", "DRE", "CPE", "TP_SPLIT", "GROUP_B_COMPILED", "GROUP_B_RULES"}
+    _list = lambda v: v if isinstance(v, list) else [v] if v else [] 
+
+    for k, rules in cm.items():
+        if k in skip_keys: continue 
+        rules = _list(rules)
+        if not rules: continue
+        
+        if isinstance(rules[0], dict) and isinstance(rules[0].get("pattern"), str) and "output" in rules[0]:
+            for r in rules:
+                if "compiled_pattern" in r:
+                    line = r["compiled_pattern"].sub(lambda m, f=r["output"]: f.format(num=m.group(1)) if "{num}" in f and m.lastindex else f, line)
+
+    # 분기 명령어 그룹 처리
+    if "GROUP_B_COMPILED" in cm:
+        def rep_cmd(m):
+            k, num, suf = m.group(1), m.group(2), m.group(3)
+            rules = cm["GROUP_B_RULES"][k]
+            for r in rules:
+                exts = r.get("extra")
+                exts_list = exts if isinstance(exts, list) else [exts] if exts else []
+                exts_clean = [e.strip() for e in exts_list if e]
+                if (suf in exts_clean) if suf else ("" in exts_clean if exts_clean else True):
+                    out = []
+                    for p in r["pattern"]:
+                        if p in ["JL", "LD", "JSL"]: out.append(f"{p}{num}")
+                        else: out.append(p)
+                    return "".join(out)
+            return m.group(0) 
+        line = cm["GROUP_B_COMPILED"].sub(rep_cmd, line)
+
+    return line
+
+# [수정] psr 파라미터 연동 추가
+def transform_word(w, sm, cm, in_reg=False, psr=False):
+    if not w or w == ".": return ""
+    
+    def _replace(match):
+        core = match.group(0) 
+        
+        # 상수 원본 보호 (기호 분리 후 검사됨)
+        if core.startswith("$"): return core
+        
+        # 정확히 일치하는 예외 단어 최우선 적용 (TP1 등)
+        if core in sm: return sm[core]
+        
+        # [이사 옴] 토큰 규칙 통합 (기호 분리 후 검사됨)
+        if m := RE_C.match(core): return _convert_c_token(int(m.group(1)), psr)
+        if m := RE_CYP.match(core):
+            ps_num = int(m.group(1))
+            return f"APS{ps_num} BPS{ps_num + 16} CPS{ps_num}" if psr else f"APS{ps_num} BPS{ps_num} CPS{ps_num}"
+        if m := RE_TS.match(core): return f"SPL{int(m.group(1))-1}"
+
+        dot = "." if in_reg else ""
+        
+        # NH, BH 처리
+        if core.startswith("NH"): return f"{dot}XD14"
+        if core.startswith("BH"): return f"{dot}YD14"
+        
+        # 조합 토큰 연산
+        if m := RE_PARTS.match(core):
+            b, n, s = m.groups()
+            if b == "N" and not s: return f"G3B{n}"
+            if b == "B" and not s: return f"G4B{n}"
+            
+            if b in ("ND", "BD"):
+                val = 14 + int(n)
+                rule = cm.get(b, {})
+                fmt = rule.get("output") if in_reg else rule.get("output_start", f"XD{val}{s} YD{val}{s}")
+                return fmt.format(val=val, suffix=s)
+                
+            if b in ("NH", "BH"):
+                val = int(n) 
+                rule = cm.get(b, {})
+                fmt = rule.get("output") if in_reg else rule.get("output_start", f"{b}{val}{s}")
+                return fmt.format(val=val, suffix=s)
+                
+            if b in sm and not s: return f"{sm[b]}{n}"
+
+        # TPH 토큰 연산
+        if m := RE_TPH.match(core):
+            b, e = int(m.group(1)), {"A":1,"B":2,"C":3,"D":4}[m.group(2)]
+            return f"TD{e if b == 1 else (b-1)*10+e}"
+            
+        return sm.get(core, core)
+
+    # 모든 기호를 건너뛰고 순수 단어 단위로만 치환 함수 호출
+    return RE_WORD.sub(_replace, w)
+
+def transform(text, sm, cm, psr=False):
+    in_reg = False  
+    res = []
+    
+    for line in text.splitlines():
+        code_part = line.split(";", 1)[0]
+        if "DATA 0" in code_part: in_reg = True
+        if "ADDRESS" in code_part: in_reg = False
+
+        if ";" in line:
+            bef, aft = line.split(";", 1)
+            aft = "/*;" + aft
+        else:
+            bef, aft = line, ""
+
+        parts = []
+        for p in RE_TAGS.split(bef):
+            if RE_TAGS.match(p): parts.append(p)
+            elif p:              
+                p = p.replace("#", "$")
+                p = p.replace('"', '^')
+                p = RE_DIAMOND.sub(r'\1\2=\3 \3\2=\1', p) 
+                p = p.replace('<', '=')
+
+                p = _process_complex_commands(_process_regex_rules(p, cm, in_reg), cm)
+                
+                for k, v in sm.items():
+                    if " " in k or "-" in k: p = p.replace(k, v)
+                    
+                # [수정] 메인 루프 단순화 (모든 토큰을 transform_word로 위임)
+                out_tokens = []
+                for t in RE_SPACE.split(p):
+                    if t.isspace(): out_tokens.append(t) 
+                    else: out_tokens.append(transform_word(t, sm, cm, in_reg, psr))
+                
+                parts.append("".join(out_tokens))
+                
+        res.append("".join(parts) + aft)
+
+    return "\n".join(res)
+
+def process_single_file(filename, input_dir, output_dir, use_psr, sm, cm):
+    # 단일 파일 처리
+    input_path = os.path.join(input_dir, filename)
+    out_filename = os.path.splitext(filename)[0] + ".pat"
+    out_path = os.path.join(output_dir, out_filename)
+    
+    with open(input_path, "r", encoding="utf-8") as f: text = f.read()
+    final = transform(preprocess(text), sm, cm, psr=use_psr)
+    with open(out_path, "w", encoding="utf-8") as f: f.write(final)
+        
+    return f"  [OK] {filename}  ->  {out_path}"
+
+def main(input_dir, output_dir, use_psr):
+    sm, cm = load_rules()
+
+    if not os.path.isdir(input_dir):
+        return print(f"Error: Input directory '{input_dir}' not found.")
+        
+    os.makedirs(output_dir, exist_ok=True)
+    asc_files = [f for f in os.listdir(input_dir) if f.lower().endswith(".asc")]
+    
+    if not asc_files: return print(f"Info: No .asc files found in '{input_dir}'.")
+        
+    print(f"Found {len(asc_files)} file(s). Starting conversion...\n" + "-"*40)
+    
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = [executor.submit(process_single_file, filename, input_dir, output_dir, use_psr, sm, cm) for filename in asc_files]
+        for future in concurrent.futures.as_completed(futures):
+            try: print(future.result())
+            except Exception as e: print(f"  [ERROR] 변환 중 오류 발생: {e}")
+        
+    print("-" * 40 + "\nAll files have been successfully converted!")
+
+if __name__ == "__main__":
+    INPUT_DIR = "./pattern" 
+    OUTPUT_DIR = "./converted_files"
+    parser = argparse.ArgumentParser(description="Batch convert .asc files to .pat")
+    parser.add_argument("-psr", action="store_true", help="Enable PSR mode")
+    args = parser.parse_args()
+    main(INPUT_DIR, OUTPUT_DIR, args.psr)
+
