@@ -1,0 +1,47 @@
+def transform_word(w, sm, cm, in_reg=False):
+    if not w or w == ".": return ""
+    
+    # 16진수 상수 보호 (변환 제외)
+    if w.startswith("$"): return w
+    
+    def _replace(match):
+        core = match.group(0) 
+        
+        # [핵심 추가] simple 맵에 'TP1' 등 정확히 일치하는 전체 단어가 명시되어 있다면 최우선 변환!
+        if core in sm: return sm[core]
+        
+        dot = "." if in_reg else ""
+        
+        # NH, BH 강제 치환
+        if core.startswith("NH"): return f"{dot}XD14"
+        if core.startswith("BH"): return f"{dot}YD14"
+        
+        # 알파벳+숫자 조합 분리 치환
+        if m := RE_PARTS.match(core):
+            b, n, s = m.groups()
+            if b == "N" and not s: return f"G3B{n}"
+            if b == "B" and not s: return f"G4B{n}"
+            
+            if b in ("ND", "BD"):
+                val = 14 + int(n)
+                rule = cm.get(b, {})
+                fmt = rule.get("output") if in_reg else rule.get("output_start", f"XD{val}{s} YD{val}{s}")
+                return fmt.format(val=val, suffix=s)
+                
+            if b in ("NH", "BH"):
+                val = int(n) 
+                rule = cm.get(b, {})
+                fmt = rule.get("output") if in_reg else rule.get("output_start", f"{b}{val}{s}")
+                return fmt.format(val=val, suffix=s)
+                
+            if b in sm and not s: return f"{sm[b]}{n}"
+
+        # TPH 토큰 매핑 연산
+        if m := RE_TPH.match(core):
+            b, e = int(m.group(1)), {"A":1,"B":2,"C":3,"D":4}[m.group(2)]
+            return f"TD{e if b == 1 else (b-1)*10+e}"
+            
+        # 기본 sm 맵 1:1 치환
+        return sm.get(core, core)
+
+    return RE_WORD.sub(_replace, w)
