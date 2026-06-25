@@ -1,3 +1,19 @@
+
+def _process_regex_rules(line, cm, in_reg=False):
+    # 💡 [예외 하드코딩 1] AB= (원본 AB<) -> CD<$ 로 변환
+    line = re.sub(r'\bAB\s*=\s*([A-Za-z0-9_]+)', r'CD<$\1', line)
+    
+    # 💡 [예외 하드코딩 2] D5= (원본 D5<) -> XD9<$ 로 변환
+    line = re.sub(r'\bD5\s*=\s*([A-Za-z0-9_]+)', r'XD9<$\1', line)
+
+    # SET 명령어 치환 여부 플래그
+    set_flg = False 
+    
+    if r_set := cm.get("SET"):
+        # ... (이하 기존 코드 동일)
+
+
+
 def transform_word(w, sm, cm, in_reg=False):
     if not w or w == ".": return ""
     
