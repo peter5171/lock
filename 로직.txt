@@ -1,0 +1,78 @@
+def transform(text, sm, cm, psr=False, is_exception=False):
+    in_reg = False  
+    res = []
+    
+    for line in text.splitlines():
+        code_part = line.split(";", 1)[0].strip()
+        
+        # 💡 [핵심] 예외 파일이 아닐 때만 레지스터 상태를 추적하고, 
+        # 예외 파일(is_exception=True)이면 무조건 in_reg = False 로 강제 유지!
+        if not is_exception:
+            if "DATA 0" in code_part: in_reg = True
+            if "ADDRESS" in code_part: in_reg = False
+            if code_part.startswith("START"): in_reg = False
+            if code_part.startswith(("HALT", "STPS", "STSPS")): in_reg = False
+        else:
+            in_reg = False 
+
+        if ";" in line:
+            bef, aft = line.split(";", 1)
+            aft = "/*;" + aft
+        else:
+            bef, aft = line, ""
+
+        parts = []
+        for p in RE_TAGS.split(bef):
+            if RE_TAGS.match(p): parts.append(p)
+            elif p:              
+                p = p.replace("#", "$")
+                p = p.replace('"', '^')
+                p = RE_DIAMOND.sub(r'\1\2=\3 \3\2=\1', p) 
+                p = p.replace('<', '=')
+
+                p = _process_complex_commands(_process_regex_rules(p, cm, in_reg), cm)
+                
+                for k, v in sm.items():
+                    if " " in k or "-" in k: p = p.replace(k, v)
+                    
+                out_tokens = []
+                for t in RE_SPACE.split(p):
+                    if t.isspace(): out_tokens.append(t) 
+                    else: out_tokens.append(transform_word(t, sm, cm, in_reg, psr))
+                
+                parts.append("".join(out_tokens))
+                
+        res.append("".join(parts) + aft)
+
+    return "\n".join(res)
+
+
+def process_single_file(filename, input_dir, output_dir, use_psr, sm, cm):
+    input_path = os.path.join(input_dir, filename)
+    out_filename = os.path.splitext(filename)[0] + ".pat"
+    out_path = os.path.join(output_dir, out_filename)
+    
+    with open(input_path, "r", encoding="utf-8") as f: 
+        text = f.read()
+        
+    # 💡 [신규] 파일 앞부분의 공백을 자르고 "MPAT"으로 시작하는지 검사
+    is_exception = not text.lstrip().startswith("MPAT")
+    
+    if is_exception:
+        # MPAT이 없으면: preprocess 스킵 + 예외 모드로 점(.) 완벽 제거
+        final = transform(text, sm, cm, psr=use_psr, is_exception=True)
+        status = "[EXCEPT]"  # 예외 파일 처리 완료 태그
+    else:
+        # 정상 파일이면: 기존대로 preprocess 거치고 정상 변환
+        final = transform(preprocess(text), sm, cm, psr=use_psr, is_exception=False)
+        status = "[  OK  ]"
+        
+    with open(out_path, "w", encoding="utf-8") as f: 
+        f.write(final)
+        
+    return f"  {status} {filename}  ->  {out_path}"
+
+
+
+
+
