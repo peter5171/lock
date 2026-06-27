@@ -1,0 +1,33 @@
+def preprocess(text):
+    # ... (상단 코드 동일) ...
+            
+        if s == "END" or s.startswith(("HALT", "MODULE END", "STPS", "STSPS")):
+            output.append(line)
+            if s != "END" and in_start: output.append(blk + "END")
+            in_start = False 
+            continue
+            
+        output.append(line)
+        
+    # 💡 1. [기존 유지] START 블록이 열려있었다면 닫아주기 (여기서 END가 1개 생길 수 있음)
+    if in_start: 
+        output.append((RE_INDENT.match(output[-1]).group(0) if output else "") + "END")
+        
+    # 💡 2. [신규 로직] 파일의 맨 끝에서부터 역순으로 탐색하여 END 개수 파악
+    end_count = 0
+    for line in reversed(output):
+        s = line.strip()
+        if not s: 
+            continue  # 빈 줄은 카운트하지 않고 건너뜀
+        if s == "END":
+            end_count += 1
+            if end_count == 2:  # 이미 2개면 더 이상 찾을 필요 없음
+                break
+        else:
+            break  # END가 아닌 다른 코드가 나오면 탐색 즉시 중단
+            
+    # 💡 3. 부족한 개수(2 - end_count)만큼 END를 정확히 추가!
+    for _ in range(2 - end_count):
+        output.append("END")
+        
+    return "\n".join(output)
