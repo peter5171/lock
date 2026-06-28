@@ -73,6 +73,38 @@ def process_single_file(filename, input_dir, output_dir, use_psr, sm, cm):
     return f"  {status} {filename}  ->  {out_path}"
 
 
+def process_single_file(filename, input_dir, output_dir, use_psr, sm, cm):
+    input_path = os.path.join(input_dir, filename)
+    is_ext = "is_exception" in filename  # 외부 파일 여부 판별
+    
+    with open(input_path, "r", encoding="utf-8") as f: 
+        text = f.read()
+    
+    # 💡 [경로 A] 외부 파일: 구조 변경(preprocess) 완전 생략! 순수 치환만 수행
+    if is_ext:
+        final = transform(text, sm, cm, psr=use_psr)
+        
+        # 원하는 특수 확장자로 변경 (예: .exc)
+        out_filename = os.path.splitext(filename)[0] + ".exc" 
+        out_path = os.path.join(output_dir, out_filename)
+        
+        with open(out_path, "w", encoding="utf-8") as f: 
+            f.write(final)
+            
+        os.chmod(out_path, 0o777) # 777 최고 권한 부여
+        return f"  [SPECIAL] {filename}  ->  {out_path} (구조 유지 완벽 / 777 권한 적용)"
+        
+    # 💡 [경로 B] 일반 패턴 파일: 전처리(preprocess)와 치환(transform) 모두 수행
+    else:
+        final = transform(preprocess(text), sm, cm, psr=use_psr)
+        
+        out_filename = os.path.splitext(filename)[0] + ".pat"
+        out_path = os.path.join(output_dir, out_filename)
+        
+        with open(out_path, "w", encoding="utf-8") as f: 
+            f.write(final)
+            
+        return f"  [OK] {filename}  ->  {out_path}"
 
 
 
