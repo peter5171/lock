@@ -1,44 +1,123 @@
-def _process_regex_rules(line, cm, in_reg=False):
-    # 💡 [예외 하드코딩 1, 2]
-    line = re.sub(r'\bAB\s*=\s*([A-Za-z0-9_]+)', r'CD<$\1', line)
-    line = re.sub(r'\bD5\s*=\s*([A-Za-z0-9_]+)', r'XD9<$\1', line)
+#우변의 내용이 무엇인지(숫자인지 문자인지)는 전혀 신경 쓰지 않습니다
+p_match = re.match(r'^([<+=]+)\s*(.*)$', trail)
 
-    # 💡 [TPH 중앙 집중형 통합 로직] 모든 TPH 경우의 수를 한 곳에서 분기
-    def repl_tph_unified(m):
-        tph_str = m.group(1) # 추출된 TPH 문자열 (예: TPH, TPH_2, TPH1B)
-        hex_val = m.group(2) # 할당된 16진수 값 (없으면 None)
+
+elif key in ["XSK", "YSK", "XCS", "YCS"]:
+                m = rule["compiled_pattern"].search(line)
+                if m:
+                    # 1. 매크로 뒤의 꼬리 (예: "< D1A" 또는 "< XA + D1A")
+                    trail = line[m.end():].strip()
+                    
+                    # 2. JSON 결과물(예: "XC=XC XS=XS")에서 타겟 레지스터(XC, XS)만 깔끔하게 추출
+                    base_output = rule["output"].format(val="".join(g for g in m.groups() if g))
+                    parts = base_output.split()
+                    
+                    targets = []
+                    for part in parts:
+                        # "XC=XC"나 "XC<XC"에서 앞부분 'XC'만 쏙 빼냄
+                        t_match = re.search(r'^([A-Za-z0-9_]+)[<+=]', part)
+                        targets.append(t_match.group(1) if t_match else part)
+                    
+                    # 3. 꼬리에서 연산자(<, =)와 우변 수식을 분리
+                    op_match = re.match(r'^([<+=]+)\s*(.*)$', trail)
+                    
+                    if op_match and targets:
+                        op = op_match.group(1)   # 예: "<"
+                        rhs = op_match.group(2)  # 예: "D1A", "XA + D1A", "XCS + D1A"
+                        
+                        new_parts = []
+                        for target in targets:
+                            # 💡 핵심: 우변(rhs)에 자기 자신(XCS)이 있다면, 타겟 이름(XC, XS)으로 각각 스마트 치환!
+                            # 예: 우변이 "XCS + D1A" 일 때, target이 XC면 "XC + D1A"가 됨
+                            replaced_rhs = re.sub(rf'\b{key}\b', target, rhs)
+                            
+                            # 최종 조립: [타겟] [연산자] [치환된 우변] (띄어쓰기 없이 찰떡 결합)
+                            new_parts.append(f"{target}{op}{replaced_rhs}")
+                        
+                        # 완성된 문자열을 원본 라인에 적용
+                        line = line[:m.start()] + " ".join(new_parts) + line[m.end()+len(trail):]
+                    else:
+                        # 꼬리가 없거나 특이 케이스면 기본 output 출력
+                        line = line[:m.start()] + base_output + line[m.end():]
+
+# ==========================================
+    # 💡 [Pass 1] TP/TPH 전용 가로채기
+    # ==========================================
+    RE_TP_ASSIGN = re.compile(r'\b(TPH(?:[12][A-D])?(?:_2)?|TP(?:[12]_2|[12])?)\s*([<+=])\s*(.*)$')
+    
+    def repl_tp_assign(m):
+        lhs = m.group(1)
+        op = m.group(2)
+        rhs = m.group(3).strip()
         
-        # 1. TPH 문자열 형태 분석 (접미사 유무 및 기본값 처리)
-        is_sub2 = "_2" in tph_str
-        core_str = tph_str.replace("_2", "")
-        
-        if core_str == "TPH":
-            # TPH 단독으로 쓰인 경우 TPH1A와 동일하게 취급
-            b, e_val = 1, 1 
+        out_op = '=' if op == '<' else op
+
+        # 1. 좌변(Target)의 High / Low 타겟 계산
+        if lhs.startswith("TPH"):
+            is_sub2 = "_2" in lhs
+            core_str = lhs.replace("_2", "")
+            if core_str == "TPH": idx = 1
+            else: idx = (int(core_str[3]) - 1) * 4 + {"A":1, "B":2, "C":3, "D":4}.get(core_str[4], 1)
+            idx += 14 if is_sub2 else 0
+            h_lhs, l_lhs = f"THD{idx}", f"TLD{idx}"
         else:
-            # TPH1B 등 알파벳/숫자가 포함된 경우
-            b = int(core_str[3])
-            e_str = core_str[4]
-            e_val = {"A": 1, "B": 2, "C": 3, "D": 4}[e_str]
+            # 💡 수정: _2를 떼지 않고 정확한 이름으로 비교!
+            if lhs in ["TP", "TP1"]: h_lhs, l_lhs = "THA", "TLA"
+            elif lhs in ["TP2", "TP1_2", "TP2_2"]: h_lhs, l_lhs = "THB", "TLB"
+            else: h_lhs, l_lhs = lhs, lhs
+
+        # 2. 우변(RHS) 분석 및 처리
+        if rhs.startswith(("#", "$")):
+            h, l = _split_24bit_hex(rhs)
+            return f"{h_lhs}{out_op}${h} {l_lhs}{out_op}${l}"
             
-        # 인덱스 도출
-        base_idx = (b - 1) * 4 + e_val
-        idx = base_idx + 14 if is_sub2 else base_idx
+        def get_hl_token(tok, is_high):
+            if tok.startswith("TPH"):
+                s2 = "_2" in tok
+                c = tok.replace("_2", "")
+                if c == "TPH": i = 1
+                else: i = (int(c[3]) - 1) * 4 + {"A":1, "B":2, "C":3, "D":4}.get(c[4], 1)
+                i += 14 if s2 else 0
+                return f"THD{i}" if is_high else f"TLD{i}"
+            if tok.startswith("TP"):
+                # 💡 수정: 여기서도 정확한 이름으로 비교!
+                if tok in ["TP", "TP1"]: return "THA" if is_high else "TLA"
+                if tok in ["TP2", "TP1_2", "TP2_2"]: return "THB" if is_high else "TLB"
+                return tok
+            if tok == "D5": return "THD9" if is_high else "TLD9"
+            if tok == "D5_2": return "THD20" if is_high else "TLD20"
+            m_d5n = re.match(r"^D5([A-Z])(?:_2)?$", tok)
+            if m_d5n:
+                let = m_d5n.group(1)
+                i = 11 if let == 'B' else 12 if let == 'C' else 13
+                return f"THD{i}" if is_high else f"TLD{i}"
+            return tok
+
+        token_pattern = r'\b(TPH(?:[12][A-D])?(?:_2)?|TP(?:[12]_2|[12])?|D5(?:[A-Z])?(?:_2)?)\b'
+        h_rhs = re.sub(token_pattern, lambda match: get_hl_token(match.group(1), True), rhs)
+        l_rhs = re.sub(token_pattern, lambda match: get_hl_token(match.group(1), False), rhs)
         
-        # 2. 위치 및 값 존재 여부에 따른 최종 출력 분기
-        if hex_val:
-            # 좌변에 위치하여 32비트 16진수 값이 할당된 경우 (분할 처리)
-            hex_padded = hex_val.zfill(8)
-            return f"TDA{idx}=${hex_padded[:4]} TDB{idx}=${hex_padded[4:]}"
-        else:
-            # 우변에 위치(A=TPH)하거나 단독 사용된 경우 (단순 치환)
-            return f"TP{idx}"
+        return f"{h_lhs}{out_op}{h_rhs} {l_lhs}{out_op}{l_rhs}"
 
-    # 정규식 설명: 
-    # \b(TPH(?:[12][A-D])?(?:_2)?)\b -> TPH 관련 모든 단어 캡처 (그룹 1)
-    # (?:\s*=\s*\$([A-Fa-f0-9]+))? -> 뒤에 =$값이 있으면 캡처, 없어도 매칭 통과 (그룹 2)
-    line = re.sub(r'\b(TPH(?:[12][A-D])?(?:_2)?)\b(?:\s*=\s*\$([A-Fa-f0-9]+))?', repl_tph_unified, line)
+    line = RE_TP_ASSIGN.sub(repl_tp_assign, line)
 
-    # SET 명령어 치환 여부 플래그
-    set_flg = False 
-    # ... (이하 기존 코드 동일)
+    # ==========================================
+    # 💡 [Pass 2] TP/TPH 단독 및 우변 출현 시 1:1 Base 매핑
+    # ==========================================
+    def repl_tp_token(m):
+        tok = m.group(1)
+        if tok in ["TP", "TP1"]: return "TA"
+        elif tok in ["TP2", "TP1_2", "TP2_2"]: return "TB"
+        elif tok.startswith("TPH"):
+            is_sub2 = "_2" in tok
+            core_str = tok.replace("_2", "")
+            if core_str == "TPH": return "TD1"
+            else:
+                b = int(core_str[3])
+                e_val = {"A":1, "B":2, "C":3, "D":4}.get(core_str[4], 1)
+                idx = (b-1) * 4 + e_val
+                idx += 14 if is_sub2 else 0
+                return f"TD{idx}"
+        return tok
+        
+    line = re.sub(r'\b(TPH(?:[12][A-D])?(?:_2)?|TP(?:[12]_2|[12])?)\b', repl_tp_token, line)
