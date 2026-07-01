@@ -203,8 +203,38 @@ def _split_hex(hex_str):
         
 # XCS, YCS 분할 함수
 def _process_cs_macros(line):
+    RE_EQUATION = re.compile(r'\b([A-Za-z0-9_]+)\s*([<+=])\s*(.*?)(?=\s+\b[A-Za-z0-9_]+\s*[<+=]|$)')
     
+    def repl_cs(m):
+        lhs = m.group(1)
+        op = m.group(2)
+        rhs = m.group(3).strip()
+        
+        if 'XCS' not in lhs and 'XCS' not in rhs and 'YCS' not in lhs and 'YCS' not in rhs:
+            return m.group(0)
+            
+        equations = [(lhs, rhs)]
+        
+        if 'XCS' in lhs or 'XCS' in rhs:
+            new_eqs = []
+            for l, r in equations:
+                new_eqs.append((re.sub(r'\bXCS\b', 'XC', l), re.sub(r'\bXCS\b', 'XC', r)))
+                new_eqs.append((re.sub(r'\bXCS\b', 'XS', l), re.sub(r'\bXCS\b', 'XS', r)))
+            equations = new_eqs
+            
+        if 'YCS' in lhs or 'YCS' in rhs:
+            new_eqs = []
+            for l, r in equations:
+                new_eqs.append((re.sub(r'\bYCS\b', 'YC', l), re.sub(r'\bYCS\b', 'YC', r)))
+                new_eqs.append((re.sub(r'\bYCS\b', 'YS', l), re.sub(r'\bYCS\b', 'YS', r)))
+            equations = new_eqs
+            
+        return " ".join([f"{l}{op}{r}" for l, r in equations])
 
+    return RE_EQUATION.sub(repl_cs, line)
+    
+def _process_data_register(line, cm, in_reg):
+    
     # 모드 설정 플래그 (0: 전체 분리, 1: 조건부 분리)
     split_flg = 1 
 
@@ -383,11 +413,15 @@ def _process_regex_rules(line, cm, in_reg=False):
         if key in skip_keys:
             continue
             
+        if isinstance(rule, dict):
+            if "compiled_pattern" in rule and "output" in rule:
+                line = rule["compiled_pattern"].sub(rule["output"], line)    
+        
         # 미리 컴파일한 정규식 사용
-        if "compiled_pattern" in rule:
-            if "output" in rule:
+        #if "compiled_pattern" in rule:
+            #if "output" in rule:
                 # simple 정규식 변환
-                line = rule["compiled_pattern"].sub(rule["output"], line)
+                #line = rule["compiled_pattern"].sub(rule["output"], line)
             
     # XT변환 규칙
     line = RE_XT.sub(repl_xt, line)
