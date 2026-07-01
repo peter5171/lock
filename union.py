@@ -140,3 +140,25 @@ def _process_master_registers(line, cm, in_reg):
     line = re.sub(r'\b(TPH(?:[12][A-D])?(?:_2)?|TP(?:[12]_2|[12])?|D\d*[A-Z]?(?:_2)?)\b', repl_final_token, line)
     
     return line
+
+
+# IDX, STI 오류
+# 4. 나머지 장비 규칙 치환
+    skip_keys = ["D_with_letter", "D5n", "XCS", "YCS", "TP_GROUP", "TPH_GROUP", "SET"]
+    for key, rule in cm.items():
+        if key in skip_keys:
+            continue
+            
+        if isinstance(rule, dict):
+            if "compiled_pattern" in rule and "output" in rule:
+                # 💡 [핵심 패치] 단순 치환이 아니라, 정규식 그룹의 이름을 가져와서 
+                # {num}, {val} 자리에 값을 쏙쏙 넣어주는(format) 고급 치환 로직!
+                try:
+                    # 정규식 매칭 결과를 받아와서 이름표(groupdict)대로 format에 넣어줍니다.
+                    line = rule["compiled_pattern"].sub(
+                        lambda m: rule["output"].format(**m.groupdict()), line
+                    )
+                except KeyError:
+                    # 만약 {} 포맷이 없는 일반 문자열이라면 기존처럼 단순 치환
+                    line = rule["compiled_pattern"].sub(rule["output"], line)
+
