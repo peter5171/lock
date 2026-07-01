@@ -162,6 +162,11 @@ def _process_master_registers(line, cm, in_reg):
                     # 만약 {} 포맷이 없는 일반 문자열이라면 기존처럼 단순 치환
                     line = rule["compiled_pattern"].sub(rule["output"], line)
 
+# Debug
+print(f"AB_ 포함 여부: {'AB_' in line}, ABCD 포함 여부: {'ABCD' in line}, 원본: {line}")
+if any(word in line for word in ["XYZ1", "AB_"]) and "ABCD" in line:
+    line = line.replace("ABCD", "")
+
 #ASCDS 제거
 if any(re.search(rf'\b{word}\b', line) for word in ["XYZ1", "PR_"]) and "ASCDS" in line:
     line = line.replace("ASCDS", "")
