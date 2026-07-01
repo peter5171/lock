@@ -31,6 +31,7 @@ RE_TPH_GROUP = re.compile(r'\b(TPH(?:[12][A-D])?(?:_2)?)\b(?:\s*[<=]\s*[$#]?([A-
 RE_TP_GROUP = re.compile(r'\b(TP(?:1_2|2_2|1|2)?)\b(?:\s*[<=]\s*\$([A-Fa-f0-9]+))?')
 RE_TP_MATCH = re.compile(r"TP\d+_\d+")
 RE_XT = re.compile(r'\b(XT)(?:1-15)?\b(\s*[<=]\s*[$#?]([A-Za-z0-9]))?')
+RE_X_OUT = re.compile(r'\b(X)\b(\s*[<=]+\s*)(XT)(\d+)')
 
 def load_rules(filepath="pat_rule.json"):
     with open(filepath, "r", encoding="utf-8") as f: 
@@ -380,6 +381,11 @@ def _process_regex_rules(line, cm, in_reg=False):
         if val is None: return f"XT{idx}"
         return f"XT{idx}=${val}"
     line = RE_XT.sub(repl_xt, line)
+    
+    def repl_x_out(m):
+        num = m.group(4)
+        return f"XT{num}"
+    line = RE_X_OUT.sub(repl_x_out, line)
     
     for key in ["IDX", "IDXI", "STI", "XSK", "YSK"]:
         if (rule := cm.get(key)) and "compiled_pattern" in rule:
