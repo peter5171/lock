@@ -188,78 +188,51 @@ def _convert_c_token(n, psr_mode):
     return f"RB{n}"
 
 def _split_hex(hex_str):
-        # 1. 특수기호 제거 후 실제 32비트 숫자(정수)로 변환
+        # 1. 특수기호 제거 후 실제 32bit 숫자로 변환
         clean_hex = hex_str.replace("$", "").replace("#", "")
         if not clean_hex: clean_hex = "0"
         val = int(clean_hex, 16)
         
-        # 2. High: 우측으로 18비트 시프트 연산 (>> 18)
+        # 2. High: 우측으로 18bit 시프트 연산 (>> 18)
         high = val >> 18
         
-        # 3. Low: 하위 16비트만 통과시키는 마스킹 연산 (& 0xFFFF)
+        # 3. Low: 하위 16bit만 통과시키는 마스킹 연산 (& 0xFFFF)
         low = val & 0xFFFF
         
-        # 4. 결과를 대문자 16진수 4자리 문자열(예: "3BCB", "1234")로 예쁘게 포맷팅
-# ==============================================================================
-# 💡 [1단계] XCS / YCS 완벽 분할 매크로
-# ==============================================================================
+        # 4. 결과를 HEX 4자리 문자열(ex "3BCB", "1234")로 포맷팅
+        
+# XCS, YCS 분할 함수
 def _process_cs_macros(line):
     
-    def repl_cs(m):
-        lhs = m.group(1)
-        op = m.group(2)
-        rhs = m.group(3).strip()
-        
-        if 'XCS' not in lhs and 'XCS' not in rhs and 'YCS' not in lhs and 'YCS' not in rhs:
-            return m.group(0)
-            
-        equations = [(lhs, rhs)]
-        
-        if 'XCS' in lhs or 'XCS' in rhs:
-            new_eqs = []
-            for l, r in equations:
-                new_eqs.append((re.sub(r'\bXCS\b', 'XC', l), re.sub(r'\bXCS\b', 'XC', r)))
-                new_eqs.append((re.sub(r'\bXCS\b', 'XS', l), re.sub(r'\bXCS\b', 'XS', r)))
-            equations = new_eqs
-            
-        if 'YCS' in lhs or 'YCS' in rhs:
-            new_eqs = []
-            for l, r in equations:
-                new_eqs.append((re.sub(r'\bYCS\b', 'YC', l), re.sub(r'\bYCS\b', 'YC', r)))
-                new_eqs.append((re.sub(r'\bYCS\b', 'YS', l), re.sub(r'\bYCS\b', 'YS', r)))
-            equations = new_eqs
-            
-        return " ".join([f"{l}{op}{r}" for l, r in equations])
 
-    return RE_EQUATION.sub(repl_cs, line)
+    # 모드 설정 플래그 (0: 전체 분리, 1: 조건부 분리)
+    split_flg = 1 
 
-
-# ==============================================================================
-# 💡 [2단계] D 레지스터 & TP/TPH 통합 파서 (생략 없음)
-# ==============================================================================
-def _process_data_register(line, cm, in_reg):
     r_d = cm.get("D_with_letter", {})
     ranges = r_d.get("ranges", {})
 
-    # ----------------------------------------------------
-    # [Pass 1] 복합 할당식 가로채기 (High/Low 분배)
-    # ----------------------------------------------------
+    # [Pass 1] (High/Low 분배)
     
     # 1. TP/TPH 가로채기
-# ----------------------------------------------------
-    # [Pass 1] 복합 할당식 가로채기 (High/Low 분배)
-    # ----------------------------------------------------
-    
-    # 💡 수정 1: 문장 끝까지 잡아먹지 않고, 다음 수식이 나오기 전까지만 정확히 끊어 읽는 정규식
+    RE_TP_ASSIGN = re.compile(r'\b(TPH(?:[12][A-D])?(?:_2)?|TP(?:[12]_2|[12])?)\s*([<+=])\s*(.*?)(?=\s+\b[A-Za-z0-9_]+\s*[<+=]|$)')
     
     def repl_tp_assign(m):
         lhs, op, rhs = m.group(1), m.group(2), m.group(3).strip()
         out_op = '=' if op == '<' else op
 
-        # 💡 수정 2: 비대칭 매핑의 핵심! (TP = TPH 형태는 1:1 매핑이 가능하므로 쪼개지 않음)
-        # 좌변이 TP계열이고, 우변이 순수한 TPH계열 단일 토큰이라면 Pass 2(TA=TD1)로 넘깁니다.
+        # TP<TPH 형식 (사용 가능함으로 그대로 반환)
         if lhs in ["TP", "TP1", "TP2", "TP1_2", "TP2_2"] and re.match(r'^TPH(?:[12][A-D])?(?:_2)?$', rhs):
             return m.group(0)
+
+        # 모드 분기
+        if split_flg == 1:
+            # 좌변이 16진수가 아닌 경우, TPH<TP가 아닌 경우 그대로 반환
+            is_hex_value = rhs.startswith(("#", "$"))
+            is_invalid_format = lhs.startswith("TPH") and rhs in ["TP", "TP1", "TP2", "TP1_2", "TP2_2"]
+            
+            if not is_hex_value and not is_invalid_format:
+                return m.group(0)
+
 
         # 좌변 High/Low 타겟 설정
         if lhs.startswith("TPH"):
@@ -271,11 +244,12 @@ def _process_data_register(line, cm, in_reg):
         else:
             h_lhs, l_lhs = ("THA", "TLA") if lhs in ["TP", "TP1"] else ("THB", "TLB")
             
-        # (이하 기존 우변 시프트 및 스마트 치환 로직 동일)
+        # 우변 시프트 분할 (값 할당)
         if rhs.startswith(("#", "$")):
             h, l = _split_24bit_hex(rhs)
             return f"{h_lhs}{out_op}${h} {l_lhs}{out_op}${l}"
         
+        # 우변 스마트 치환 (수식 분할)
         def get_hl_token(tok, is_high):
             if tok.startswith("TPH"):
                 is_sub2 = "_2" in tok
@@ -300,7 +274,8 @@ def _process_data_register(line, cm, in_reg):
 
     line = RE_TP_ASSIGN.sub(repl_tp_assign, line)
 
-    # 2. D 계열 가로채기
+    # 2. D 계열 처리 (16진수 할당일 경우의 처리)
+    RE_D_ASSIGN = re.compile(r'\b(D\d*[A-Z]?(?:_2)?)\s*([<+=])\s*([#$][A-Fa-f0-9_]+)\b')
     def repl_d_assign(m):
         token, op, val = m.group(1), m.group(2), m.group(3)
         h, l = _split_24bit_hex(val)
@@ -320,35 +295,31 @@ def _process_data_register(line, cm, in_reg):
 
     line = RE_D_ASSIGN.sub(repl_d_assign, line)
 
-    # ----------------------------------------------------
-    # [Pass 2] 단독 출현 토큰 1:1 최종 매핑
-    # ----------------------------------------------------
+    # 단독 구문 1:1 최종 매핑
     def repl_final_token(m):
         tok = m.group(1)
+        dot = "." if in_reg else ""
         
-        # TP/TPH 계열 단독 매핑
-        if tok in ["TP", "TP1"]: return "TA"
-        if tok in ["TP2", "TP1_2", "TP2_2"]: return "TB"
+        if tok in ["TP", "TP1"]: return f"{dot}TA"
+        if tok in ["TP2", "TP1_2", "TP2_2"]: return f"{dot}TB"
         if tok.startswith("TPH"):
             is_sub2 = "_2" in tok
             core_str = tok.replace("_2", "")
-            if core_str == "TPH": return "TD1"
+            if core_str == "TPH": return f"{dot}TD1"
             else:
                 b = int(core_str[3])
                 e_val = {"A":1, "B":2, "C":3, "D":4}.get(core_str[4], 1)
                 idx = (b-1) * 4 + e_val
                 idx += 14 if is_sub2 else 0
-                return f"TD{idx}"
+                return f"{dot}TD{idx}"
                 
-        # D5 계열 단독 매핑
-        if tok == "D5_2": return "TD20"
-        if tok == "D5": return "TD9"
+        if tok == "D5_2": return f"{dot}TD20"
+        if tok == "D5": return f"{dot}TD9"
         m_d5n = re.match(r"^D5([A-Z])(?:_2)?$", tok)
         if m_d5n:
             idx = 11 if m_d5n.group(1) == 'B' else 12 if m_d5n.group(1) == 'C' else 13
-            return f"TD{idx}"
+            return f"{dot}TD{idx}"
             
-        # 나머지 D 계열 단독 매핑
         m_let = re.match(r"^D(\d*)([A-Z]?)(?:_2)?$", tok)
         if m_let:
             num = int(m_let.group(1) or 0)
@@ -357,14 +328,14 @@ def _process_data_register(line, cm, in_reg):
                 idx = _calc_d_idx(num, let, ranges) if let else num
                 prefix = "YD" if num == 4 else "XD"
                 suffix = "_2" if "_2" in tok else ""
-                return f"{prefix}{idx}{suffix}"
+                return f"{dot}{prefix}{idx}{suffix}"
                 
         return tok
 
     line = re.sub(r'\b(TPH(?:[12][A-D])?(?:_2)?|TP(?:[12]_2|[12])?|D\d*[A-Z]?(?:_2)?)\b', repl_final_token, line)
     
     return line
-	
+# XT 변환
 def repl_xt(m):
     xt_str = m.group(1)
     idx = m.group(2)
@@ -372,16 +343,16 @@ def repl_xt(m):
     if xt_str == "XT": idx = 1
     if val is None: return f"XT{idx}"
 	return f"XT{idx}=${val}"
-	
+
+# X 출력 대응 처리
 def repl_x_out(m):
 	num = m.group(4)
 	return f"XT{num}"
 
-# ==============================================================================
-# 🚀 [메인 실행 함수]
-# ==============================================================================
+
 def _process_regex_rules(line, cm, in_reg=False):
 	
+    # SET 구문 처리
 	set_flg = False 
 	if r_set := cm.get("SET"):
         def repl_set(m):
@@ -398,24 +369,24 @@ def _process_regex_rules(line, cm, in_reg=False):
 		
 	line = re.sub(r'\b([A-Za-z0-9_]+)\s*<>\s*([A-Za-z0-9_]+)\b', r'\1=\2 \2=\1', line)	
 	
-    # 1. 수식 격리 및 XCS / YCS 분할
+    # 1. 수식 정규식 및 XCS, YCS 분할
     line = _process_cs_macros(line)
 
-    # 2. TP / TPH / D 계열 완벽 처리 (High/Low 및 단독 치환)
+    # 2. (TP, TPH, D 계열) Data Register 처리 (High/Low 분할 및 단독구문 변환)
     line = _process_data_register(line, cm, in_reg)
 
-    # 3. 기타 장비 규칙 치환 (기존 시스템 유지)
-    # 이미 1,2단계에서 완벽히 치환했으므로 꼬이지 않도록 이 키들은 무시합니다.
+
+    # 이미 변환된 구문은 스킵
     skip_keys = ["D_with_letter", "D5n", "XCS", "YCS", "TP_GROUP", "TPH_GROUP"]
     
     for key, rule in cm.items():
         if key in skip_keys:
             continue
             
-        # 사용하시던 나머지 기본 룰셋 처리 로직
+        # 미리 컴파일한 정규식 사용
         if "compiled_pattern" in rule:
             if "output" in rule:
-                # 일반적인 단순 정규식 치환
+                # simple 정규식 변환
                 line = rule["compiled_pattern"].sub(rule["output"], line)
             
     # XT변환 규칙
