@@ -162,3 +162,6 @@ def _process_master_registers(line, cm, in_reg):
                     # 만약 {} 포맷이 없는 일반 문자열이라면 기존처럼 단순 치환
                     line = rule["compiled_pattern"].sub(rule["output"], line)
 
+#ASCDS 제거
+if any(re.search(rf'\b{word}\b', line) for word in ["XYZ1", "PR_"]) and "ASCDS" in line:
+    line = line.replace("ASCDS", "")
