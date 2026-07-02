@@ -1,94 +1,38 @@
-import re
 
 def _process_master_registers(line, cm, in_reg):
-    # ==========================================
-    # 💡 1. 쪼개기 모드 설정 플래그 (0: 전체 분리, 1: 조건부 분리)
     split_flg = 1 
     
-    # 💡 2. 16진수 값을 High/Low로 쪼갤 좌변(LHS) "허용 접두사 목록"
-    # 나중에 TP, D1 등 추가가 필요하면 이 괄호 안에 "TP", "D1" 식으로 추가만 하시면 됩니다!
-    # (.startswith 로 검사하므로 "D5"만 적어도 D5, D5_2, D5A 모두 자동 적용됩니다)
+    # [추가된 부분] 쪼갤 대상을 한정하는 허용 목록
     SPLIT_ALLOWED_PREFIXES = ("TPH", "D5")
-    # ==========================================
-    
-    dot = "." if in_reg else "" 
 
-    r_d = cm.get("D_with_letter", {})
-    ranges = r_d.get("ranges", {})
-
-    # ----------------------------------------------------
-    # [Pass 1] 복합 할당식 가로채기 (High/Low 분배)
-    # ----------------------------------------------------
     
-    # 1. TP/TPH 가로채기
-    RE_TP_ASSIGN = re.compile(r'\b(TPH(?:[12][A-D])?(?:_2)?|TP(?:[12]_2|[12])?)\s*([<+=])\s*(.*?)(?=\s+\b[A-Za-z0-9_]+\s*[<+=]|$)')
-    
-    def repl_tp_assign(m):
-        lhs, op, rhs = m.group(1), m.group(2), m.group(3).strip()
-        out_op = '=' if op == '<' else op
 
-        # [예외] TA=TD1 1:1 통과
         if lhs in ["TP", "TP1", "TP2", "TP1_2", "TP2_2"] and re.match(r'^TPH(?:[12][A-D])?(?:_2)?$', rhs):
             return m.group(0)
 
-        # 우변이 16진수(기호 포함 또는 순수 숫자)인지 확인
+        # [변경된 부분] #, $ 외에 숫자 시작도 인정하고, 허용 목록에 없으면 튕겨냄
         is_hex_value = bool(re.match(r'^[#$0-9]', rhs))
         
-        # 🚨 [방어 로직] 16진수 값인데, 허용 목록(TPH, D5 등)에 없는 좌변이라면 쪼개지 않음!
         if is_hex_value and not lhs.startswith(SPLIT_ALLOWED_PREFIXES):
             return m.group(0)
 
-        # [조건부 분리 (모드 1)]
         if split_flg == 1:
-            is_invalid_format = lhs.startswith("TPH") and rhs in ["TP", "TP1", "TP2", "TP1_2", "TP2_2"]
-            if not is_hex_value and not is_invalid_format:
-                return m.group(0)
 
-        # 좌변 High/Low 타겟 설정
-        if lhs.startswith("TPH"):
-            is_sub2 = "_2" in lhs
-            core_str = lhs.replace("_2", "")
-            idx = 1 if core_str == "TPH" else (int(core_str[3]) - 1) * 4 + {"A":1, "B":2, "C":3, "D":4}.get(core_str[4], 1)
-            idx += 14 if is_sub2 else 0
-            h_lhs, l_lhs = f"{dot}THD{idx}", f"{dot}TLD{idx}"
-        else:
-            h_lhs, l_lhs = (f"{dot}THA", f"{dot}TLA") if lhs in ["TP", "TP1"] else (f"{dot}THB", f"{dot}TLB")
             
-        # 우변 시프트 분할
-        if is_hex_value:
-            m_hex = re.match(r'^([#$][A-Fa-f0-9_]+|[0-9][A-Fa-f0-9_]*)(.*)$', rhs, re.IGNORECASE)
-            if m_hex:
-                hex_val = m_hex.group(1)
-                trailing_junk = m_hex.group(2)
-                h, l = _split_24bit_hex(hex_val)
-                return f"{h_lhs}{out_op}${h} {l_lhs}{out_op}${l}{trailing_junk}"
+# [변경된 부분] 정규식 끝에 순수 숫자도 잡도록 추가됨 
+    RE_D_ASSIGN = re.compile(r'\b(D\d*[A-Z]?(?:_2)?)\s*([<+=])\s*([#$][A-Fa-f0-9_]+|[0-9][A-Fa-f0-9_]*)\b', re.IGNORECASE)
+    
+    def repl_d_assign(m):
+        token, op, val = m.group(1), m.group(2), m.group(3)
         
-        # 우변 스마트 치환 (수식 분할)
-        def get_hl_token(tok, is_high):
-            if tok.startswith("TPH"):
-                is_sub2 = "_2" in tok
-                c = tok.replace("_2", "")
-                i = 1 if c == "TPH" else (int(c[3]) - 1) * 4 + {"A":1, "B":2, "C":3, "D":4}.get(c[4], 1)
-                i += 14 if is_sub2 else 0
-                return f"{dot}THD{i}" if is_high else f"{dot}TLD{i}"
-            if tok.startswith("TP"):
-                return (f"{dot}THA" if is_high else f"{dot}TLA") if tok in ["TP", "TP1"] else (f"{dot}THB" if is_high else f"{dot}TLB")
-            if tok == "D5": return f"{dot}THD9" if is_high else f"{dot}TLD9"
-            if tok == "D5_2": return f"{dot}THD20" if is_high else f"{dot}TLD20"
-            m_d5n = re.match(r"^D5([A-Z])(?:_2)?$", tok)
-            if m_d5n:
-                i = 11 if m_d5n.group(1) == 'B' else 12 if m_d5n.group(1) == 'C' else 13
-                return f"{dot}THD{i}" if is_high else f"{dot}TLD{i}"
-            return f"{dot}{tok}" if tok in ["D1A", "D2A", "XCS"] else tok
+        # [추가된 부분] 허용 목록 방어 
+        if not token.startswith(SPLIT_ALLOWED_PREFIXES):
+            return m.group(0)
+            
+        h, l = _split_24bit_hex(val)
 
-        token_pattern = r'\b(TPH(?:[12][A-D])?(?:_2)?|TP(?:[12]_2|[12])?|D5(?:[A-Z])?(?:_2)?)\b'
-        h_rhs = re.sub(token_pattern, lambda match: get_hl_token(match.group(1), True), rhs)
-        l_rhs = re.sub(token_pattern, lambda match: get_hl_token(match.group(1), False), rhs)
-        return f"{h_lhs}{out_op}{h_rhs} {l_lhs}{out_op}{l_rhs}"
+      
 
-    line = RE_TP_ASSIGN.sub(repl_tp_assign, line)
-
-    # 2. D 계열 가로채기 (16진수 할당 전용)
     RE_D_ASSIGN = re.compile(r'\b(D\d*[A-Z]?(?:_2)?)\s*([<+=])\s*([#$][A-Fa-f0-9_]+|[0-9][A-Fa-f0-9_]*)\b', re.IGNORECASE)
     def repl_d_assign(m):
         token, op, val = m.group(1), m.group(2), m.group(3)
@@ -98,12 +42,16 @@ def _process_master_registers(line, cm, in_reg):
             return m.group(0)
             
         h, l = _split_24bit_hex(val)
-        
+        #[out of range 수정] 
+        if token == "D5": return f"{dot}THD9{op}${h} {dot}TLD9{op}${l}"
         if token == "D5_2": return f"{dot}THD20{op}${h} {dot}TLD20{op}${l}"
         if token.startswith("D5"):
+            # 여기까지 왔다면 D5A, D5B 처럼 무조건 3글자 이상임이 보장됨
             idx = 11 if token[2]=='B' else 12 if token[2]=='C' else 13
             return f"{dot}THD{idx}{op}${h} {dot}TLD{idx}{op}${l}"
-            
+        #[수정 끝]    
+
+
         # (만약 나중에 D1 등을 허용 목록에 추가했을 때를 대비한 기본 로직 유지)
         m_let = re.match(r"^D(\d*)([A-Z]?)(?:_2)?$", token)
         if m_let:
@@ -115,52 +63,52 @@ def _process_master_registers(line, cm, in_reg):
 
     line = RE_D_ASSIGN.sub(repl_d_assign, line)
 
-    # ----------------------------------------------------
-    # [Pass 2] 단독 출현 토큰 1:1 최종 매핑
-    # ----------------------------------------------------
-    def repl_final_token(m):
-        tok = m.group(1)
-        
-        if tok in ["TP", "TP1"]: return f"{dot}TA"
-        if tok in ["TP2", "TP1_2", "TP2_2"]: return f"{dot}TB"
-        if tok.startswith("TPH"):
-            is_sub2 = "_2" in tok
-            core_str = tok.replace("_2", "")
-            if core_str == "TPH": return f"{dot}TD1"
-            else:
-                b = int(core_str[3])
-                e_val = {"A":1, "B":2, "C":3, "D":4}.get(core_str[4], 1)
-                idx = (b-1) * 4 + e_val
-                idx += 14 if is_sub2 else 0
-                return f"{dot}TD{idx}"
-                
-        if tok == "D5_2": return f"{dot}TD20"
-        if tok == "D5": return f"{dot}TD9"
-        m_d5n = re.match(r"^D5([A-Z])(?:_2)?$", tok)
-        if m_d5n:
-            idx = 11 if m_d5n.group(1) == 'B' else 12 if m_d5n.group(1) == 'C' else 13
-            return f"{dot}TD{idx}"
-            
-        m_let = re.match(r"^D(\d*)([A-Z]?)(?:_2)?$", tok)
-        if m_let:
-            num = int(m_let.group(1) or 0)
-            let = m_let.group(2)
-            if f"D{num}" in ranges and (not let or let in ranges[f"D{num}"]):
-                idx = _calc_d_idx(num, let, ranges) if let else num
-                
-                # 💡 [복구됨] 문맥 인식(X/Y) 스마트 스캐너
-                if re.search(r'\bY\s*[<+=]', line):
-                    prefix = "YD"
-                elif re.search(r'\bX\s*[<+=]', line):
-                    prefix = "XD"
-                else:
-                    prefix = "YD" if num == 4 else "XD"
-                    
-                suffix = "_2" if "_2" in tok else ""
-                return f"{dot}{prefix}{idx}{suffix}"
-                
-        return tok
 
-    line = re.sub(r'\b(TPH(?:[12][A-D])?(?:_2)?|TP(?:[12]_2|[12])?|D\d*[A-Z]?(?:_2)?)\b', repl_final_token, line)
-    
-    return line
+
+import traceback # (맨 위에 추가) 에러의 상세 원인을 추적하기 위한 기본 모듈
+
+def main():
+    # 💡 1. 에러를 차곡차곡 모아둘 빈 리스트를 준비합니다.
+    error_log = []
+
+    # (파일을 읽어오거나 텍스트를 가져오는 기존 코드)
+    # with open('input.txt', 'r') as f:
+    #     lines = f.readlines()
+
+    # 💡 2. enumerate에 start=1을 주어서 1번째 줄부터 번호를 셉니다.
+    for line_num, line in enumerate(lines, start=1):
+        try:
+            # 기존에 하시던 정상적인 처리 로직
+            # in_reg 플래그 등의 처리는 질문자님의 기존 코드 흐름대로 유지하세요.
+            processed_line = _process_regex_rules(line, cm, in_reg)
+            
+            # 정상적으로 변환되었으면 원래대로 print
+            print(processed_line, end="") 
+            
+        except Exception as e:
+            # 🚨 [에러 발생!] 프로그램이 멈추지 않게 낚아채서 error_log에 기록합니다.
+            error_msg = f"Line {line_num} ➔ 에러 원인: {str(e)}\n  (원본 문장: {line.strip()})"
+            error_log.append(error_msg)
+            
+            # 출력물이 망가지지 않도록 에러가 난 줄은 원본을 그냥 출력하거나 
+            # 주석 처리해서 출력해줍니다. (선택 사항)
+            print(f"; [ERROR_SKIPPED] {line}", end="") 
+
+
+    # =====================================================================
+    # 💡 3. 모든 출력이 끝난 맨 밑바닥에서 에러 리스트를 쫙 뿌려줍니다.
+    # =====================================================================
+    if error_log:
+        print("\n\n" + "="*60)
+        print("🚨 🚨 🚨 [경고] 변환 중 발생한 오류 리스트 🚨 🚨 🚨")
+        print("="*60)
+        for err in error_log:
+            print(err)
+            print("-" * 60)
+        print("총 {}개의 라인에서 오류가 발생했습니다.".format(len(error_log)))
+        print("="*60)
+
+# 실행
+# if __name__ == "__main__":
+#     main()
+
