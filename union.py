@@ -170,3 +170,12 @@ if any(word in line for word in ["XYZ1", "AB_"]) and "ABCD" in line:
 #ASCDS 제거
 if any(re.search(rf'\b{word}\b', line) for word in ["XYZ1", "PR_"]) and "ASCDS" in line:
     line = line.replace("ASCDS", "")
+
+import re
+
+if any(word in line for word in ["XYZ1", "AB_"]) and "ABCD" in line:
+    # 🚨 기존 코드: line = line.replace("ABCD", "")
+    
+    # 💡 수정된 코드: 독립된 단어인 ABCD만 찾아 빈 문자열로 치환
+    line = re.sub(r'\bABCD\b', '', line)
+
