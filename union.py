@@ -1,4 +1,61 @@
 
+    # ----------------------------------------------------
+    # [Pass 2] 단독 출현 토큰 1:1 최종 매핑
+    # ----------------------------------------------------
+    def repl_final_token(m):
+        tok = m.group(1)
+        
+        # (TP / TPH 계열 로직은 기존과 동일)
+        if tok in ["TP", "TP1"]: return f"{dot}TA"
+        if tok in ["TP2", "TP1_2", "TP2_2"]: return f"{dot}TB"
+        if tok.startswith("TPH"):
+            is_sub2 = "_2" in tok
+            core_str = tok.replace("_2", "")
+            if core_str == "TPH": return f"{dot}TD1"
+            else:
+                b = int(core_str[3])
+                e_val = {"A":1, "B":2, "C":3, "D":4}.get(core_str[4], 1)
+                idx = (b-1) * 4 + e_val
+                idx += 14 if is_sub2 else 0
+                return f"{dot}TD{idx}"
+                
+        if tok == "D5_2": return f"{dot}TD20"
+        if tok == "D5": return f"{dot}TD9"
+        m_d5n = re.match(r"^D5([A-Z])(?:_2)?$", tok)
+        if m_d5n:
+            idx = 11 if m_d5n.group(1) == 'B' else 12 if m_d5n.group(1) == 'C' else 13
+            return f"{dot}TD{idx}"
+            
+        # 💡 [핵심 복구] D 계열: 좌변 문맥을 스캔하여 X/Y 판단
+        m_let = re.match(r"^D(\d*)([A-Z]?)(?:_2)?$", tok)
+        if m_let:
+            num = int(m_let.group(1) or 0)
+            let = m_let.group(2)
+            if f"D{num}" in ranges and (not let or let in ranges[f"D{num}"]):
+                idx = _calc_d_idx(num, let, ranges) if let else num
+                
+                # 🚀 문장 전체(line)를 스캔해서 좌변에 Y가 있는지, X가 있는지 확인!
+                if re.search(r'\bY\s*[<+=]', line):
+                    prefix = "YD"
+                elif re.search(r'\bX\s*[<+=]', line):
+                    prefix = "XD"
+                else:
+                    # 좌변에 딱히 X, Y가 명시되지 않았다면 기존 규칙(num==4일때만 YD) 사용
+                    prefix = "YD" if num == 4 else "XD"
+                    
+                suffix = "_2" if "_2" in tok else ""
+                return f"{dot}{prefix}{idx}{suffix}"
+                
+        return tok
+
+
+
+
+
+
+
+
+
 def _process_master_registers(line, cm, in_reg):
     # ==========================================
     # 💡 쪼개기 모드 설정 플래그 (0: 전체 분리, 1: 조건부 분리)
