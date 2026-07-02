@@ -173,9 +173,9 @@ if any(re.search(rf'\b{word}\b', line) for word in ["XYZ1", "PR_"]) and "ASCDS" 
 
 import re
 
-if any(word in line for word in ["XYZ1", "AB_"]) and "ABCD" in line:
-    # 🚨 기존 코드: line = line.replace("ABCD", "")
-    
-    # 💡 수정된 코드: 독립된 단어인 ABCD만 찾아 빈 문자열로 치환
-    line = re.sub(r'\bABCD\b', '', line)
+import re
 
+# 1. 트리거 확인: "XYZ1" 이나 "AB_" 가 라인에 존재하는지 확인
+if any(word in line for word in [ "PR_"]):
+    # 2. 제거 실행: 독립된 단어인 'SABCD' 또는 'ABCD'를 모두 찾아 빈 문자열로 제거
+    line = re.sub(r'\b(SCROFF|PSCROFF)\b', '', line)
